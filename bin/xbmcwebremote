@@ -7,81 +7,90 @@ from urllib import unquote
 from wsgiref.simple_server import make_server
 
 def start_server():
-    r = remote( {"bedroom":"192.168.0.210","familyroom":"192.168.0.211"}, # Dict of Frontends and IPs
-                ["TV","Movies/Features"], # List of folders
-                {"fpath":"/mnt/raid","spath":"smb://192.168.0.200/public"}) # Samba to Filesystem comparison
+    conf = open("/etc/xbmcwebremote/config.json","r")
+    j = json.load(conf)
+    conf.close()
+    r = remote( j["frontends"], # Dict of Frontends and IPs
+                j["folders"], # List of folders
+                j["sambashare"]) # Samba to Filesystem comparison
     # Start WSGI
-    httpd = make_server("",8000,r.process_request)
-    print "Serving on port 8000"
+    port = j["port"]
+    httpd = make_server("",port,r.process_request)
+    print "Serving on port "+str(port)
     httpd.serve_forever()
 
+# Remote Class
 class remote():
     def __init__(self,  fes, # List of frontends 
                         folders, # List of folders
                         smbinfo): # dictionary of Samba Path Info
-        # A list of valid Frontends.  Each frontend is a dictionary with IP and Name
+        # Save Frontends to Object
         self.FrontEnds = fes
-        # Load a FileTree in memory containing all of the filesystem info
-        # TODO Strip Slashes
-        self.uniqueint = 0
 
-        self.FileTree = {   "name":smbinfo["fpath"],
-                            "spath":smbinfo["spath"],
-                            "children":[]}    
+        # Create FileTree JSON to organize file heiarchy
+        self.FileTree = {   "name":smbinfo["fpath"].rstrip("/"), # OS FileSystem Root
+                            "spath":smbinfo["spath"].rstrip("/"), # Samba FileSystem Root
+                            "children":[]}    # List of Children
 
+        # Add Selected Folders to File Tree
         for f in folders:
-            self.FileTree["children"].append({"name":f,"children":[],"parent":self.FileTree,"uid":self.uid()})
+            self.FileTree["children"].append({  "name":f, # Name of the folder
+                                                "children":[], # Empty list for children
+                                                "parent":self.FileTree}) # Pointer to Parent
+
         # Parse the folders and populate the FileTree
-        self.refresh_file_tree()
+        self.scan_folders()
+
+        # Add a Unique Identfier to each item of the tree for quick recalling
         self.add_uids()
 
     ############
     ## FileTree Methods
     ###########
 
-    # Browse the file system and arange media files in a tree
-    def refresh_file_tree(self):
-        self.scan_folders(self.FileTree["children"])
+    # Scans the FileTree to find all files/folders and add them to the tree
+    def scan_folders(self,fs=None): # List of files/Folders
+        # This is so the initial call can be without parameters
+        if fs == None:
+            fs = self.FileTree["children"]
 
-
-    # Recursive Helper Function for refreshing the FileTree
-    def scan_folders(self,fs): # List of files/Folders
-        # For each file/folder
-        for f in fs:
-            # If directory
-            fpath = self.get_fpath(f)
+        for f in fs: # Scan Each item
+            fpath = self.get_fpath(f) # Get full OS path
             if os.path.isdir(fpath):
-                # Add all file to the "children" list and recursivly scan those children
+                # Add all files to the "children" list
                 for c in sorted(os.listdir(fpath)):
-                    f["children"].append({"name":c,"children":[],"parent":f,"uid":self.uid()})
-
+                    f["children"].append({"name":c,"children":[],"parent":f})
+            # Recusivly call the same function for the children
             self.scan_folders(f["children"])
 
+    # Traverses FileTree and populates UID field for eac item.
+    # THis is just a hash of the full OS Path
     def add_uids(self,f=None):
-        if f == None:
+        if f == None: # THis is so the first call can be without arguments
             f = self.FileTree
+        # Generate a sha1 hash
         f["uid"] = hashlib.sha1(self.get_spath(f)).hexdigest()
+        # Recursivly call for each child
         for c in f["children"]:
             self.add_uids(c)
     
-    # Creates filesystem path for given file/folder object from FileTree
+    # Generate full OS filesystem path for given file/folder object from FileTree
     def get_fpath(self,f):
+        # Start with thie file name
         fpath = f["name"]
+        # Step back through the parents and prepend each folder name
         while "parent" in f:
-            # Move up a level
             f = f["parent"]
-            # Ad to path
             fpath = f["name"]+"/"+fpath
 
         return fpath
 
-    # Creates Samba path for give file/forlder object from FileTree 
+    # Generate a full Samba filesystem path for a given file/folder object
+    # Same as get_fpath except the spath is used when availible 
     def get_spath(self,f):
         spath = f["name"]
         while "parent" in f:
-            # Move up a level
             f = f["parent"]
-            # Add to path
             if "spath" in f:
                 spath = f["spath"]+"/"+spath
             else:
@@ -89,34 +98,44 @@ class remote():
 
         return spath
 
-    # Search Tree or a String
-    def search(self,q):
-        ms = []
-        self.search_req(ms,q,self.FileTree)
-        return ms
+    # Searchs the Tree for a string query: q.  
+    # Returns a list of matches
+    def search(self,q, # String Search Query
+                        ms=[],  # List of Matches
+                        f=None): # Current File/Folder Object
+        if f==None:  # THis so the original call can have 1 parameter (q)
+            f=self.FileTree
+            ms = [] # Clear Matches when starting over
 
-    def search_req(self,ms, # List of matching file/folder objects
-                        q,  # Search Query
-                        f): # Current File/Folder Object
+        # If matches, add f to the list of matches
         if self.matches(q,f["name"]):
             ms.append(f)
-        else:
-            for c in f["children"]:
-                self.search_req(ms,q,c)
 
+        else: # If not, recusivly search its children
+            for c in f["children"]:
+                self.search(q,ms,c)
+
+        # When all recursion is done, return matches
+        return ms
+
+    # Searchs FileTree for UID Hash.
+    # Returns the file/folder object 
     def search_uid(self,uid,f=None):
-        if f == None:
+        if f == None: # For clean calling
             f = self.FileTree
+
+        # If it matches, return f object
         if f["uid"] == uid:
             return f
-        else:
+        else: # Otherwise, search its children and return any matches
             for c in f["children"]:
                 m = self.search_uid(uid,c)
                 if m != None:
                     return m
                     
             
-        
+    # Determins if a query and a filename match.
+    # This method will allow for more customization of the query grammar.
     def matches(self,   q, # Search QUery
                         fname): # File/folder name
         if q == "" or q == "*":
@@ -126,15 +145,12 @@ class remote():
         else:
             return False
 
+    # Prints Tree to terminal
+    # THis is more for debug purposes
     def print_tree(self,fs,ind = 0):
         for f in fs:
             print ("  "*ind)+f["name"]
             self.print_tree(f["children"],ind+1)
-
-    def uid(self):
-        self.uniqueint += 1
-        return str(self.uniqueint)
-            
 
 
     ###############
@@ -142,23 +158,26 @@ class remote():
     ################
 
     # Send a json object to the frontend using TCP communication
-    def send_json(self,js,f):
+    def send_json(self, js,     # List of JSON commands (json Object)
+                        feip):  # IP address of frontend (String)
 
         # Get IP from f
-        ip = f
+        ip = feip
 
+        # Create and open a TCP Socket.  XBMC uses port 9090
         s = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
         s.connect((ip,9090))
 
+        # Send the list of JSON requests. One at a time
         for j in js:
             s.send(json.dumps(j))
-            print s.recv(1024)
+            print s.recv(1024) # For debug purposes TODO, figure out what the recv number means?
+        # Clsoe the Socket
         s.close()
+        # Return Status.  For now, always return 0
+        # TODO Figure out hwo to detect JSON errors
         return 0
 
-    ## For testing
-    def test_cmd(self):
-        self.send_json([self.clear_playlist(),self.add_item(),self.start_playlist()],"192.168.0.210")
 
     # Adds an item to the playlist
     def add_item(self,spath):# Complete Samba Path
@@ -182,36 +201,43 @@ class remote():
         j["params"] = [{"playlistid":1}]
         return j
 
-    ## TODO Add method that stops active players
+    ## TODO Add method that gets all active players and stops them
 
-    # Creates a blank JSON Request
+    # Creates a blank JSON Request (used by the other JSON requests)
     def blank_json(self):
         return {"jsonrpc":"2.0", "id":1}
 
-    # Selects a random friends episode and plays the next 4 episodes
+    # Randomly grabs a block of adjacent videos from a folder
     def play_group(self,f,  # Folder Object
                         feip, # FrontEnd IP
-                        numeps): # Number of Eps
+                        numeps): # Size of requested episode block
+
         numeps = int(numeps)
-        # Selects the first match for the Query
         # Get total number of episodes
         totaleps = len(f["children"])
+        # If block is bigger than total number of episodes, reduce episode block size
         if totaleps < numeps:
             numeps = totaleps
-        # Select a random episode
 
+        # Select a random episode
         index = random.randint(0,totaleps-numeps)
-        # JSON Requests
+        # Create list to hold JSON requests
         js = []
+        # Clear current playlist
         js.append(self.clear_playlist())
+        # Add the episode block
         for i in range(index,index+numeps):
             js.append(self.add_item(self.get_spath(f["children"][i])))
+        # Start Playback
         js.append(self.start_playlist())
         
+        # Send the request
         self.send_json(js,feip)
-        
-    def play_single(self, f,feip):
-        # JS Requests
+    
+    # Play a single file    
+    def play_single(self,   f,  # FileTree Object pointing to file
+                            feip): # Frontend Ip Address
+        # Create list of JSON requests
         js = []
         js.append(self.clear_playlist())
         js.append(self.add_item(self.get_spath(f)))
@@ -220,21 +246,19 @@ class remote():
         self.send_json(js,feip)
 
     #############
-    ## HTTP Methods
+    ## HTTP Methods --- Handling the HTTP server requests
     #############
 
-    # Converts tree to HTML text so it looks nice.
-    def tree_to_html(self, tree):
-        pass
-
-    # Process the HTTP Request
+    # Look at path and determine which method shoudl service the request
     def process_request(self,e,s):
         # Set Type as HTML
 
+        # Removes slashes from the ends
         wholepath = e.get("PATH_INFO",'').lstrip("/").rstrip("/")
+        # Removes GET data from the path name
         path = wholepath.split("/")[0]
 
-
+        # Get output HTML from one of the methods
         output = ""
         if path=="":
             output = self.main_page_req()
@@ -245,17 +269,19 @@ class remote():
         else: 
             output = "Invalid Path"
 
+        # Sets HTML header and sends HTML data
         s('200 OK', [('Content-Type', 'text/html; charset=ISO-8859-1')])
         return [output]
 
     # Prints main HTML page.  The environment variable is not passed since its not needed
     def main_page_req(self):
         # Open HTML file
-        f = open("main.html","r")
+        f = open("/usr/local/xbmcwebremote/main.html","r") ## TODO Move this to /usr/share folder
         data = f.read()
         f.close()
         return data
 
+    # PRints list of files/folders
     def list_req(self,e):
         # Parse GET/POST data for filter query
         d = self.get_dict(e)
@@ -265,11 +291,15 @@ class remote():
         # Filter Tree
         results = self.search(d["q"])
         # Convert to HTML and return
-        return self.tree_to_html(results)
+        output = self.tree_to_html(results)
+        return output
 
+    # Executes JSOn command
     def cmd_req(self,e):
         # Parse GET/POST data
         d = self.get_dict(e)
+
+        # TODO Add a "Rescan Folders" command option
 
         # Find Object based on UID
         f = self.search_uid(d["uid"])
@@ -284,6 +314,7 @@ class remote():
         #self.send_json(j,f)
         return "Command Sent" # Otherwise return error
 
+    # Creates a dictionary of the "GET" data.  Only keeps first get object of each key name
     def get_dict(self,e):
         d = parse_qs(e["QUERY_STRING"])
         fix_d = {}
@@ -291,6 +322,7 @@ class remote():
             fix_d[key] = escape(unquote(d[key][0]))
         return fix_d
 
+    # Converts a list of tree nodes to HTML
     def tree_to_html(self,fs):
         output = ""
         for f in fs:
@@ -301,9 +333,9 @@ class remote():
             output += "</a>"
             output += self.tree_to_html(f["children"])
             output += "</div>"
-        return output
+        return str(output)
 
-### Start Server Call
+### Start Server Call.  Only called if script is executed independantly
 if __name__ == "__main__":
     start_server()
 
