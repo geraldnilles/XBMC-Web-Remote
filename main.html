@@ -1,0 +1,89 @@
+<html>
+<head>
+    <title>XBMC Web Remote</title>
+
+    <style type="text/css">
+.result {
+    padding: 10px;
+    border: solid black 1px;
+}
+div{
+    padding: 10px;
+}
+
+#numeps {
+    width: 3em;
+}
+    </style>
+
+    <script src="//ajax.googleapis.com/ajax/libs/jquery/1.8.0/jquery.min.js" type="text/javascript"></script>
+    <script type="text/javascript">
+
+$(document).ready(function(){
+
+    function search(){
+        var query = $("#query").val();
+        $.get("/list",{q: query},function(data){
+            $("#results").html(data);
+        });
+    }
+
+    $(document).on("keypress","input#query",function(e){
+        if (e.keyCode == 13){
+            e.preventDefault();
+            search();
+        }
+    });
+
+    $(document).on("click","a.item",function(e){
+        e.preventDefault();
+        // Get UID of 
+        var uid = $(this).attr("uid");
+        // Get Room
+        var room = $("input:radio:checked").val()
+        // Get Number of Episodes
+        var numeps = $("#numeps").val()
+
+        $.get("/cmd",{uid:uid,room:room,numeps:numeps}, function(data){
+            $("#debug").html(data)
+        });
+        
+
+    });
+        
+    search();
+
+});
+
+    </script>
+</head>
+<body>
+    <h2>XBMC Web Remote</h2>
+    <div id="search">
+        Filter List
+        <input id="query" type="text" />
+    </div>
+    <div id="options">
+    <table border=1>
+        <tr>
+            <th>Room</th>
+            <th># of Eps</th>
+        </tr>
+        <tr>
+            <td>
+                <input type="radio" name="room" CHECKED value="bedroom" /> Bedroom <br />
+                <input type="radio" name="room" value="familyroom" /> Family Room <br />
+            </td>
+            <td>
+                <input type="text" id="numeps" value="5" />
+            </td>
+        </tr>
+    </table>
+    </div>
+    <div id="debug">
+    </div>
+    <div id="results">
+        Results Here
+    </div>
+</body>
+</html>
